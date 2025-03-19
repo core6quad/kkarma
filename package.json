@@ -1,0 +1,14 @@
+{
+  "name": "kkarma-discord-bot",
+  "version": "1.0.0",
+  "description": "A Discord bot for kkarma project",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node bot.js"
+  },
+  "dependencies": {
+    "discord.js": "^14.0.0",
+    "dotenv": "^16.0.0",
+    "os-utils": "^0.0.14"
+  }
+}
