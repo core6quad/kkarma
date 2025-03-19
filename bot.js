@@ -15,15 +15,14 @@ const EMOJI_MAP = {
     UPVOTE: '⬆️',
     DOWNVOTE: '⬇️'
 };
-const CHANNEL_ID = '840600744964915210'; 
+const CHANNEL_ID = '840600744964915210';
 
 const client = new Client({ 
     intents: [
-        GatewayIntentBits.Guilds, 
-        GatewayIntentBits.GuildMessages, 
-        GatewayIntentBits.MessageContent, 
-        GatewayIntentBits.GuildMessageReactions,
-        GatewayIntentBits.MessageContent 
+        GatewayIntentBits.Guilds,
+        GatewayIntentBits.GuildMessages,
+        GatewayIntentBits.MessageContent,
+        GatewayIntentBits.GuildMessageReactions
     ],
     partials: [
         Partials.Message,
@@ -32,38 +31,47 @@ const client = new Client({
     ]
 });
 
-// Ensure data directory exists
-const dataDir = path.join(__dirname, 'data');
-if (!fs.existsSync(dataDir)) {
-    fs.mkdirSync(dataDir);
-}
+// Конфигурация из .env
+const config = {
+    selfInteraction: process.env.ITSELF_INTERACTION === 'true',
+    adminId: process.env.ADMIN_ID,
+    cooldown: Number(process.env.COOLDOWN) || DEFAULT_COOLDOWN,
+    prefix: process.env.PREFIX || '!'
+};
 
-const itselfInteraction = process.env.ITSELF_INTERACTION === 'true';
-const adminId = process.env.ADMIN_ID;
-const cooldownAmount = parseInt(process.env.COOLDOWN) || 1000; // Default to 1000ms if not set
-const prefix = process.env.PREFIX || '!';
 const cooldowns = new Map();
+const dataDir = path.join(__dirname, 'data');
 
-client.once('ready', () => {
-    console.log(`Logged in as ${client.user.tag}!`);
-});
-
-function getKarmaFilePath(guildId) {
-    return path.join(dataDir, `${guildId}.json`);
-}
-
-function loadKarmaData(guildId) {
-    const filePath = getKarmaFilePath(guildId);
-    if (fs.existsSync(filePath)) {
-        return JSON.parse(fs.readFileSync(filePath, 'utf8'));
+// Инициализация директории данных
+(async () => {
+    try {
+        await fs.access(dataDir);
+    } catch {
+        await fs.mkdir(dataDir, { recursive: true });
     }
-    return {};
+})();
+
+// Вспомогательные функции
+const getKarmaPath = guildId => path.join(dataDir, `${guildId}.json`);
+
+async function loadKarma(guildId) {
+    try {
+        return JSON.parse(await fs.readFile(getKarmaPath(guildId), 'utf8');
+    } catch {
+        return {};
+    }
 }
 
-function saveKarmaData(guildId, data) {
-    const filePath = getKarmaFilePath(guildId);
-    fs.writeFileSync(filePath, JSON.stringify(data));
+async function saveKarma(guildId, data) {
+    await fs.writeFile(getKarmaPath(guildId), JSON.stringify(data));
 }
+
+function createEmbed(color, description) {
+    return new EmbedBuilder().setColor(color).setDescription(description);
+}
+
+// Обработчики событий
+client.once('ready', () => console.log(`Logged in as ${client.user.tag}!`));
 
 client.on('messageCreate', async message => {
     if (message.author.bot || !message.content.startsWith(config.prefix)) return;
@@ -94,19 +102,14 @@ client.on('messageCreate', async message => {
                 
             case 'karma': {
                 const targetUser = message.mentions.users.first() || message.author;
-                const reply = await message.channel.send({
+                await message.channel.send({
                     embeds: [createEmbed(COLORS.INFO, 
                         `${targetUser.username} has ${karmaData[targetUser.id] || 0} karma.`
                     )]
                 });
 
                 if (message.author.id === CHANNEL_ID) {
-                    try {
-                        await message.delete();
-                        console.log(`Deleted message from ${TARGET_USER_ID}`);
-                    } catch (err) {
-                        console.error('Failed to delete message:', err);
-                    }
+                    await message.delete().catch(console.error);
                 }
                 break;
             }
@@ -134,11 +137,11 @@ client.on('messageCreate', async message => {
             case 'reset':
                 if (message.author.id !== config.adminId) {
                     return message.channel.send({
-                        embeds: [createEmbed(COLORS.ERROR, 'Insufficient permissions.')]
+                        embeds: [createEmbed(COLORS.ERROR, '❌ Insufficient permissions.')]
                     });
                 }
                 await saveKarma(guildId, {});
-                message.channel.send({ embeds: [createEmbed(COLORS.INFO, 'Karma reset.')] });
+                message.channel.send({ embeds: [createEmbed(COLORS.INFO, '✅ Karma reset.')] });
                 break;
                 
             case 'host':
@@ -152,7 +155,7 @@ client.on('messageCreate', async message => {
                 message.channel.send({
                     embeds: [new EmbedBuilder()
                         .setColor(COLORS.INFO)
-                        .setTitle('Server Metrics')
+                        .setTitle('🖥 Server Metrics')
                         .addFields(
                             { name: 'CPU Load', value: `${(cpuLoad * 100).toFixed(2)}%`, inline: true },
                             { name: 'CPU Cores', value: os.cpus().length.toString(), inline: true },
@@ -163,81 +166,45 @@ client.on('messageCreate', async message => {
                 break;
         }
     } catch (err) {
-        console.error('Command handling error:', err);
+        console.error('Command error:', err);
+        message.channel.send({ 
+            embeds: [createEmbed(COLORS.ERROR, '❌ An error occurred while processing the command.')]
+        });
     }
 });
-client.on('messageReactionAdd', async (reaction, user) => {
+
+// Обработчики реакций
+async function handleReaction(reaction, user, operation) {
     if (user.bot) return;
 
-    // Fetch the message if it's a partial
-    if (reaction.partial) {
-        try {
-            await reaction.fetch();
-        } catch (error) {
-            console.error('Something went wrong when fetching the message:', error);
-            return;
+    try {
+        if (reaction.partial) await reaction.fetch();
+        if (!config.selfInteraction && user.id === reaction.message.author.id) return;
+
+        const guildId = reaction.message.guild.id;
+        const karmaData = await loadKarma(guildId);
+        const userId = reaction.message.author.id;
+
+        const value = {
+            [EMOJI_MAP.UPVOTE]: operation === 'add' ? 1 : -1,
+            [EMOJI_MAP.DOWNVOTE]: operation === 'add' ? -1 : 1
+        }[reaction.emoji.name];
+
+        if (value) {
+            karmaData[userId] = (karmaData[userId] || 0) + value;
+            await saveKarma(guildId, karmaData);
+            reaction.message.channel.send({
+                embeds: [createEmbed(COLORS.INFO,
+                    `${reaction.message.author.username} now has ${karmaData[userId]} karma.`
+                )]
+            });
         }
+    } catch (err) {
+        console.error('Reaction error:', err);
     }
+}
 
-    const message = reaction.message;
-    const messageAuthor = message.author;
-    const guildId = message.guild.id;
-    let userKarma = loadKarmaData(guildId);
-
-    if (!itselfInteraction && user.id === messageAuthor.id) return;
-
-    if (reaction.emoji.name === '⬆️') {
-        userKarma[messageAuthor.id] = (userKarma[messageAuthor.id] || 0) + 1;
-        saveKarmaData(guildId, userKarma);
-        const embed = new EmbedBuilder()
-            .setColor('#0099ff')
-            .setDescription(`${messageAuthor.username} now has ${userKarma[messageAuthor.id]} karma.`);
-        message.channel.send({ embeds: [embed] });
-    } else if (reaction.emoji.name === '⬇️') {
-        userKarma[messageAuthor.id] = (userKarma[messageAuthor.id] || 0) - 1;
-        saveKarmaData(guildId, userKarma);
-        const embed = new EmbedBuilder()
-            .setColor('#0099ff')
-            .setDescription(`${messageAuthor.username} now has ${userKarma[messageAuthor.id]} karma.`);
-        message.channel.send({ embeds: [embed] });
-    }
-});
-
-client.on('messageReactionRemove', async (reaction, user) => {
-    if (user.bot) return;
-
-    // Fetch the message if it's a partial
-    if (reaction.partial) {
-        try {
-            await reaction.fetch();
-        } catch (error) {
-            console.error('Something went wrong when fetching the message:', error);
-            return;
-        }
-    }
-
-    const message = reaction.message;
-    const messageAuthor = message.author;
-    const guildId = message.guild.id;
-    let userKarma = loadKarmaData(guildId);
-
-    if (!itselfInteraction && user.id === messageAuthor.id) return;
-
-    if (reaction.emoji.name === '⬆️') {
-        userKarma[messageAuthor.id] = (userKarma[messageAuthor.id] || 0) - 1;
-        saveKarmaData(guildId, userKarma);
-        const embed = new EmbedBuilder()
-            .setColor('#0099ff')
-            .setDescription(`${messageAuthor.username} now has ${userKarma[messageAuthor.id]} karma.`);
-        message.channel.send({ embeds: [embed] });
-    } else if (reaction.emoji.name === '⬇️') {
-        userKarma[messageAuthor.id] = (userKarma[messageAuthor.id] || 0) + 1;
-        saveKarmaData(guildId, userKarma);
-        const embed = new EmbedBuilder()
-            .setColor('#0099ff')
-            .setDescription(`${messageAuthor.username} now has ${userKarma[messageAuthor.id]} karma.`);
-        message.channel.send({ embeds: [embed] });
-    }
-});
+client.on('messageReactionAdd', (r, u) => handleReaction(r, u, 'add'));
+client.on('messageReactionRemove', (r, u) => handleReaction(r, u, 'remove'));
 
 client.login(process.env.DISCORD_TOKEN);
