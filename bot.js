@@ -1,16 +1,29 @@
 require('dotenv').config();
 const { Client, GatewayIntentBits, Partials, EmbedBuilder } = require('discord.js');
-const fs = require('fs');
+const fs = require('fs').promises;
 const path = require('path');
 const os = require('os');
 const osUtils = require('os-utils');
+
+// Конфигурационные константы
+const DEFAULT_COOLDOWN = 1000;
+const COLORS = {
+    INFO: '#0099ff',
+    ERROR: '#ff0000'
+};
+const EMOJI_MAP = {
+    UPVOTE: '⬆️',
+    DOWNVOTE: '⬇️'
+};
+const CHANNEL_ID = '840600744964915210'; 
 
 const client = new Client({ 
     intents: [
         GatewayIntentBits.Guilds, 
         GatewayIntentBits.GuildMessages, 
         GatewayIntentBits.MessageContent, 
-        GatewayIntentBits.GuildMessageReactions
+        GatewayIntentBits.GuildMessageReactions,
+        GatewayIntentBits.MessageContent 
     ],
     partials: [
         Partials.Message,
@@ -53,101 +66,106 @@ function saveKarmaData(guildId, data) {
 }
 
 client.on('messageCreate', async message => {
-    if (message.author.bot) return;
-
-    if (!message.content.startsWith(prefix)) return;
+    if (message.author.bot || !message.content.startsWith(config.prefix)) return;
 
     const now = Date.now();
-
-    if (cooldowns.has(message.author.id)) {
-        const expirationTime = cooldowns.get(message.author.id) + cooldownAmount;
-        if (now < expirationTime) {
-            const timeLeft = (expirationTime - now) / 1000;
-            const embed = new EmbedBuilder()
-                .setColor('#ff0000')
-                .setDescription(`Please wait ${timeLeft.toFixed(1)} more second(s) before reusing the command.`);
-            return message.channel.send({ embeds: [embed] });
-        }
+    const cooldown = cooldowns.get(message.author.id) || 0;
+    
+    if (now < cooldown + config.cooldown) {
+        const remaining = (cooldown + config.cooldown - now) / 1000;
+        return message.channel.send({ 
+            embeds: [createEmbed(COLORS.ERROR, `Please wait ${remaining.toFixed(1)}s before reusing commands.`)]
+        });
     }
 
     cooldowns.set(message.author.id, now);
-    setTimeout(() => cooldowns.delete(message.author.id), cooldownAmount);
+    setTimeout(() => cooldowns.delete(message.author.id), config.cooldown);
 
+    const [command, ...args] = message.content.slice(config.prefix.length).trim().split(/ +/);
     const guildId = message.guild.id;
-    let userKarma = loadKarmaData(guildId);
 
-    const args = message.content.slice(prefix.length).trim().split(' ');
-    const command = args.shift().toLowerCase();
+    try {
+        const karmaData = await loadKarma(guildId);
+        
+        switch(command.toLowerCase()) {
+            case 'ping':
+                message.channel.send({ embeds: [createEmbed(COLORS.INFO, 'Pong.')] });
+                break;
+                
+            case 'karma': {
+                const targetUser = message.mentions.users.first() || message.author;
+                const reply = await message.channel.send({
+                    embeds: [createEmbed(COLORS.INFO, 
+                        `${targetUser.username} has ${karmaData[targetUser.id] || 0} karma.`
+                    )]
+                });
 
-    if (command === 'ping') {
-        const embed = new EmbedBuilder()
-            .setColor('#0099ff')
-            .setDescription('Pong.');
-        message.channel.send({ embeds: [embed] });
-    } else if (command === 'karma') {
-        const user = message.mentions.users.first() || message.author;
-        const karma = userKarma[user.id] || 0;
-        const embed = new EmbedBuilder()
-            .setColor('#0099ff')
-            .setDescription(`${user.username} has ${karma} karma.`);
-        message.channel.send({ embeds: [embed] });
-    } else if (command === 'leaderboard') {
-        const sortedUsers = Object.keys(userKarma).sort((a, b) => userKarma[b] - userKarma[a]);
-        const topUsers = sortedUsers.slice(0, 3);
-        let leaderboard = 'Top 3 Users by Karma:\n';
-        if (topUsers.length === 0) {
-            leaderboard = 'No data';
-        } else {
-            const userPromises = topUsers.map(async (userId, index) => {
-                let user = client.users.cache.get(userId);
-                if (!user) {
-                    user = await client.users.fetch(userId);
+                if (message.author.id === CHANNEL_ID) {
+                    try {
+                        await message.delete();
+                        console.log(`Deleted message from ${TARGET_USER_ID}`);
+                    } catch (err) {
+                        console.error('Failed to delete message:', err);
+                    }
                 }
-                return `${index + 1}. ${user.username} - ${userKarma[userId]} karma\n`;
-            });
-            const userResults = await Promise.all(userPromises);
-            leaderboard += userResults.join('');
+                break;
+            }
+                
+            case 'leaderboard': {
+                const topUsers = Object.entries(karmaData)
+                    .sort(([,a], [,b]) => b - a)
+                    .slice(0, 3);
+                
+                const leaderboard = topUsers.length 
+                    ? await Promise.all(topUsers.map(async ([id, karma], index) => {
+                        const user = await client.users.fetch(id).catch(() => ({ username: 'Unknown' }));
+                        return `${index + 1}. ${user.username} - ${karma} karma`;
+                    }))
+                    : ['No data'];
+                
+                message.channel.send({
+                    embeds: [createEmbed(COLORS.INFO,
+                        `Top 3 Users:\n${leaderboard.join('\n')}`
+                    )]
+                });
+                break;
+            }
+                
+            case 'reset':
+                if (message.author.id !== config.adminId) {
+                    return message.channel.send({
+                        embeds: [createEmbed(COLORS.ERROR, 'Insufficient permissions.')]
+                    });
+                }
+                await saveKarma(guildId, {});
+                message.channel.send({ embeds: [createEmbed(COLORS.INFO, 'Karma reset.')] });
+                break;
+                
+            case 'host':
+                const ping = Date.now() - message.createdTimestamp;
+                const [cpuLoad, memTotal, memFree] = await Promise.all([
+                    new Promise(res => osUtils.cpuUsage(res)),
+                    os.totalmem() / 1024 ** 2,
+                    os.freemem() / 1024 ** 2
+                ]);
+                
+                message.channel.send({
+                    embeds: [new EmbedBuilder()
+                        .setColor(COLORS.INFO)
+                        .setTitle('Server Metrics')
+                        .addFields(
+                            { name: 'CPU Load', value: `${(cpuLoad * 100).toFixed(2)}%`, inline: true },
+                            { name: 'CPU Cores', value: os.cpus().length.toString(), inline: true },
+                            { name: 'Memory Usage', value: `${(memTotal - memFree).toFixed(2)}MB/${memTotal.toFixed(2)}MB`, inline: true },
+                            { name: 'Latency', value: `${ping}ms`, inline: true }
+                        )]
+                });
+                break;
         }
-        const embed = new EmbedBuilder()
-            .setColor('#0099ff')
-            .setDescription(leaderboard);
-        message.channel.send({ embeds: [embed] });
-    } else if (command === 'reset') {
-        if (message.author.id === adminId) {
-            userKarma = {};
-            saveKarmaData(guildId, userKarma);
-            const embed = new EmbedBuilder()
-                .setColor('#0099ff')
-                .setDescription('Karma has been reset.');
-            message.channel.send({ embeds: [embed] });
-        } else {
-            const embed = new EmbedBuilder()
-                .setColor('#ff0000')
-                .setDescription('You do not have permission to use this command.');
-            message.channel.send({ embeds: [embed] });
-        }
-    } else if (command === 'host') {
-        osUtils.cpuUsage(cpuLoad => {
-            const cpuCores = os.cpus().length;
-            const totalMem = (os.totalmem() / 1024 / 1024).toFixed(2);
-            const freeMem = (os.freemem() / 1024 / 1024).toFixed(2);
-            const usedMem = (totalMem - freeMem).toFixed(2);
-            const ping = Date.now() - message.createdTimestamp;
-
-            const embed = new EmbedBuilder()
-                .setColor('#0099ff')
-                .setTitle('Host Information')
-                .addFields(
-                    { name: 'CPU Load', value: `${(cpuLoad * 100).toFixed(2)}%`, inline: true },
-                    { name: 'CPU Cores', value: `${cpuCores}`, inline: true },
-                    { name: 'RAM Usage', value: `${usedMem} MB / ${totalMem} MB`, inline: true },
-                    { name: 'Ping', value: `${ping} ms`, inline: true }
-                );
-            message.channel.send({ embeds: [embed] });
-        });
+    } catch (err) {
+        console.error('Command handling error:', err);
     }
 });
-
 client.on('messageReactionAdd', async (reaction, user) => {
     if (user.bot) return;
 
